@@ -1,0 +1,76 @@
+package {{.PackageName}}
+
+import (
+	"context"
+	"net"
+
+	// TODO: 请根据实际情况修改导入路径
+	// "your-module-path/{{.ProtoPackageName}}"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+)
+
+// Register{{.ServiceName}}Service 注册{{.ServiceName}}服务
+func Register{{.ServiceName}}Service(ctx context.Context, service {{.ProtoPackageName}}.{{.ServiceName}}ServiceServer) {
+	serviceInfo := {{.ProtoPackageName}}.{{.ServiceName}}Service_ServiceDesc
+	
+	// 检查服务是否已注册
+	if _, ok := GlobalRegistry.discover(serviceInfo); ok {
+		panic("服务重复注册: " + string(serviceInfo.ServiceName))
+	}
+	
+	go func() {
+		// 监听随机端口
+		lis, err := net.Listen("tcp", "localhost:0")
+		if err != nil {
+			panic("监听端口失败: " + err.Error())
+		}
+		
+		// 创建gRPC服务器
+		server := grpc.NewServer(
+		)
+		go func() {
+        	<-ctx.Done()
+        	server.GracefulStop()
+        }()
+		// 注册服务
+		{{.ProtoPackageName}}.Register{{.ServiceName}}ServiceServer(server, service)
+		
+		// 注册服务地址
+		GlobalRegistry.RegisterAddr(serviceInfo, lis.Addr().String())
+		
+		// 启动服务器
+		if err = server.Serve(lis); err != nil {
+			panic("服务启动失败: " + err.Error())
+		}
+	}()
+}
+
+// Get{{.ServiceName}}Service 获取{{.ServiceName}}服务客户端
+func Get{{.ServiceName}}Service() {{.ProtoPackageName}}.{{.ServiceName}}ServiceClient {
+	serviceInfo := {{.ProtoPackageName}}.{{.ServiceName}}Service_ServiceDesc
+	
+	// 尝试获取已缓存的客户端
+	if client, exists := GlobalRegistry.getClient(serviceInfo); exists {
+		return client.({{.ProtoPackageName}}.{{.ServiceName}}ServiceClient)
+	}
+	
+	// 发现服务地址
+	addr := GlobalRegistry.mustDiscover(serviceInfo)
+	
+	// 创建连接
+	conn, err := grpc.NewClient(addr, 
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+    )
+	if err != nil {
+		panic("创建客户端连接失败: " + err.Error())
+	}
+	
+	// 创建客户端
+	client := {{.ProtoPackageName}}.New{{.ServiceName}}ServiceClient(conn)
+	
+	// 缓存客户端
+	GlobalRegistry.registerClient(serviceInfo, client)
+	
+	return client
+}
