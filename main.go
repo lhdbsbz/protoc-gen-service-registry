@@ -23,7 +23,8 @@ type PluginConfig struct {
 type ServiceInfo struct {
 	PackageName      string // 生成的包名
 	ServiceName      string // 服务名称
-	ProtoPackageName string // proto包名
+	ProtoPackageName string // proto包名（用于代码中的类型引用，如 prepare_order.PrepareOrderServiceServer）
+	ProtoImportPath  string // proto导入路径（完整路径，用于 import 语句，如 git.dreame.tech/.../gen/proto/pages/prepare_order）
 }
 
 func main() {
@@ -112,11 +113,11 @@ func loadTemplate(config *PluginConfig) (string, error) {
 }
 
 func generateServiceRegistry(gen *protogen.Plugin, file *protogen.File, service *protogen.Service, config *PluginConfig) error {
-	// 提取proto包名（去掉 proto. 前缀）
-	protoPackageName := strings.TrimPrefix(string(file.GoPackageName), "proto_")
-	if protoPackageName == string(file.GoPackageName) {
-		protoPackageName = strings.TrimPrefix(string(file.GoPackageName), "proto.")
-	}
+	// 获取完整的导入路径（支持嵌套目录）
+	protoImportPath := string(file.GoImportPath)
+
+	// 使用 protogen 解析的包名（用于代码中的类型引用）
+	protoPackageName := string(file.GoPackageName)
 
 	// 服务名称（去掉 Service 后缀）
 	serviceName := strings.TrimSuffix(string(service.Desc.Name()), "Service")
@@ -126,6 +127,7 @@ func generateServiceRegistry(gen *protogen.Plugin, file *protogen.File, service 
 		PackageName:      config.PackageName,
 		ServiceName:      serviceName,
 		ProtoPackageName: protoPackageName,
+		ProtoImportPath:  protoImportPath,
 	}
 
 	// 加载模板
@@ -152,8 +154,8 @@ func generateServiceRegistry(gen *protogen.Plugin, file *protogen.File, service 
 		return fmt.Errorf("格式化代码失败: %v", err)
 	}
 
-	// 生成文件名
-	fileName := fmt.Sprintf("%s.go", strings.ToLower(serviceName))
+	// 生成文件名（转换为小驼峰格式）
+	fileName := fmt.Sprintf("%s.go", toCamelCase(serviceName))
 	outputPath := filepath.Join(config.OutputDir, fileName)
 
 	// 创建输出文件
@@ -163,4 +165,22 @@ func generateServiceRegistry(gen *protogen.Plugin, file *protogen.File, service 
 	}
 
 	return nil
+}
+
+// toCamelCase 将大驼峰转换为小驼峰格式
+// 例如: "PrepareOrder" -> "prepareOrder", "Order" -> "order", "User" -> "user"
+func toCamelCase(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+
+	// 如果第一个字符是大写字母，将其转为小写
+	first := s[0]
+	if first >= 'A' && first <= 'Z' {
+		// 将第一个字符转为小写，其余保持不变
+		return string(first+32) + s[1:]
+	}
+
+	// 如果第一个字符已经小写，直接返回
+	return s
 }
