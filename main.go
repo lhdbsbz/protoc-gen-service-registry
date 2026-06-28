@@ -155,6 +155,8 @@ type wiringService struct {
 	Category     string     // "openapi" 或 "grpc-gateway"
 	WsMethods    []wsMethod // WebSocket 流式方法列表
 	HasHttpRoute bool       // 是否具有 http 路由方法（包含 google.api.http），以此决定是否生成 RegisterXxxHandlerFromEndpoint
+	// 走 grpc-gateway mux 的纯 server-streaming 方法全名（/pkg.Service/Method）：响应须 SSE 直出、不套信封。
+	StreamingHttpMethods []string
 }
 
 func main() {
@@ -295,6 +297,8 @@ func buildWiringService(file *protogen.File, service *protogen.Service, moduleRo
 	}
 
 	var wsMethods []wsMethod
+	var streamingHttp []string
+	pkgName := string(file.Desc.Package()) // proto 包名，如 proto.story
 	for _, method := range service.Methods {
 		// 如果是客户端流式（Client-streaming）或者双向流式（Bidi-streaming），加入 WS 映射列表
 		if method.Desc.IsStreamingClient() {
@@ -304,20 +308,27 @@ func buildWiringService(file *protogen.File, service *protogen.Service, moduleRo
 				ResponseType: string(method.Output.Desc.Name()),
 			})
 		}
+		// 纯 server-streaming 且挂了 google.api.http：走 grpc-gateway mux、按 SSE 直出，
+		// 须在响应改写处跳过统一信封。全名格式与运行时 runtime.RPCMethod 一致：/pkg.Service/Method。
+		if methodHasHTTP(method) && method.Desc.IsStreamingServer() && !method.Desc.IsStreamingClient() {
+			streamingHttp = append(streamingHttp,
+				fmt.Sprintf("/%s.%s/%s", pkgName, full, string(method.Desc.Name())))
+		}
 	}
 
 	hasGateway := serviceHasHTTP(service) || len(wsMethods) > 0
 
 	return wiringService{
-		FullName:     full,
-		ProtoPkg:     strings.ReplaceAll(protoRelPath, "/", "_"),
-		ProtoImport:  string(file.GoImportPath),
-		ImplSeg:      seg,
-		ImplImport:   moduleRoot + "/" + implDir + "/" + implPath,
-		HasGateway:   hasGateway,
-		Category:     serviceGatewayCategory(service),
-		WsMethods:    wsMethods,
-		HasHttpRoute: serviceHasHTTP(service),
+		FullName:             full,
+		ProtoPkg:             strings.ReplaceAll(protoRelPath, "/", "_"),
+		ProtoImport:          string(file.GoImportPath),
+		ImplSeg:              seg,
+		ImplImport:           moduleRoot + "/" + implDir + "/" + implPath,
+		HasGateway:           hasGateway,
+		Category:             serviceGatewayCategory(service),
+		WsMethods:            wsMethods,
+		HasHttpRoute:         serviceHasHTTP(service),
+		StreamingHttpMethods: streamingHttp,
 	}
 }
 
@@ -443,6 +454,22 @@ func generateWiring(gen *protogen.Plugin, svcs []wiringService) error {
 			fmt.Fprintf(&buf, "\t\t)\n")
 			fmt.Fprintf(&buf, "\t})\n")
 		}
+	}
+	buf.WriteString("}\n")
+
+	// StreamingGatewayMethods：走 grpc-gateway mux 的 server-streaming 方法全名集合。
+	// 响应须按 SSE 逐块直出、不套统一信封 {code,message,data}。由「server-streaming + google.api.http」
+	// 自动判定，新增此类接口无需手改 pkg/grpc_gateway_util——重新生成即可，调用方按需引用本集合。
+	var streamingMethods []string
+	for _, s := range svcs {
+		streamingMethods = append(streamingMethods, s.StreamingHttpMethods...)
+	}
+	sort.Strings(streamingMethods)
+	buf.WriteString("\n// StreamingGatewayMethods 是走 grpc-gateway mux 的 server-streaming 方法全名集合，\n")
+	buf.WriteString("// 响应按 SSE 逐块直出、不套统一信封。由 server-streaming + google.api.http 自动判定。\n")
+	buf.WriteString("var StreamingGatewayMethods = map[string]bool{\n")
+	for _, m := range streamingMethods {
+		fmt.Fprintf(&buf, "\t%q: true,\n", m)
 	}
 	buf.WriteString("}\n")
 
