@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strings"
 	"text/template"
-	"unicode"
 
 	"google.golang.org/genproto/googleapis/api/annotations"
 	"google.golang.org/protobuf/compiler/protogen"
@@ -51,34 +50,35 @@ import (
 )
 
 // Register{{.ServiceName}}Service 注册{{.ServiceName}}服务
-func Register{{.ServiceName}}Service(ctx context.Context, service {{.ProtoPackageName}}.{{.ServiceName}}ServiceServer) {
-	serviceInfo := {{.ProtoPackageName}}.{{.ServiceName}}Service_ServiceDesc
+func Register{{.ServiceName}}Service(ctx context.Context, service {{.ProtoPackageName}}.{{.ProtoServiceName}}ServiceServer) {
+	serviceInfo := {{.ProtoPackageName}}.{{.ProtoServiceName}}Service_ServiceDesc
 
 	// 检查服务是否已注册
 	if _, ok := core.GlobalRegistry.Discover(serviceInfo); ok {
 		panic("服务重复注册: " + string(serviceInfo.ServiceName))
 	}
 
-	go func() {
-		// 监听随机端口
-		lis, err := net.Listen("tcp", "localhost:0")
-		if err != nil {
-			panic("监听端口失败: " + err.Error())
-		}
+	// 监听随机端口（同步进行，避免注册时序竞态）
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		panic("监听端口失败: " + err.Error())
+	}
 
+	// 注册服务地址（同步进行，确保调用端能立即 Discover 到）
+	core.GlobalRegistry.RegisterAddr(serviceInfo, lis.Addr().String())
+
+	go func() {
 		// 创建gRPC服务器
 		server := grpc.NewServer(
 			grpc.ChainUnaryInterceptor(core.MetadataCalleeInterceptor),
+			grpc.ChainStreamInterceptor(core.MetadataStreamCalleeInterceptor),
 		)
 		go func() {
 			<-ctx.Done()
 			server.GracefulStop()
 		}()
 		// 注册服务
-		{{.ProtoPackageName}}.Register{{.ServiceName}}ServiceServer(server, service)
-
-		// 注册服务地址
-		core.GlobalRegistry.RegisterAddr(serviceInfo, lis.Addr().String())
+		{{.ProtoPackageName}}.Register{{.ProtoServiceName}}ServiceServer(server, service)
 
 		// 启动服务器
 		if err = server.Serve(lis); err != nil {
@@ -88,12 +88,12 @@ func Register{{.ServiceName}}Service(ctx context.Context, service {{.ProtoPackag
 }
 
 // Get{{.ServiceName}}Service 获取{{.ServiceName}}服务客户端
-func Get{{.ServiceName}}Service() {{.ProtoPackageName}}.{{.ServiceName}}ServiceClient {
-	serviceInfo := {{.ProtoPackageName}}.{{.ServiceName}}Service_ServiceDesc
+func Get{{.ServiceName}}Service() {{.ProtoPackageName}}.{{.ProtoServiceName}}ServiceClient {
+	serviceInfo := {{.ProtoPackageName}}.{{.ProtoServiceName}}Service_ServiceDesc
 
 	// 尝试获取已缓存的客户端
 	if client, exists := core.GlobalRegistry.GetClient(serviceInfo); exists {
-		return client.({{.ProtoPackageName}}.{{.ServiceName}}ServiceClient)
+		return client.({{.ProtoPackageName}}.{{.ProtoServiceName}}ServiceClient)
 	}
 
 	// 发现服务地址
@@ -103,13 +103,14 @@ func Get{{.ServiceName}}Service() {{.ProtoPackageName}}.{{.ServiceName}}ServiceC
 	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithChainUnaryInterceptor(core.MetadataCallerInterceptor),
+		grpc.WithChainStreamInterceptor(core.MetadataStreamCallerInterceptor),
 	)
 	if err != nil {
 		panic("创建客户端连接失败: " + err.Error())
 	}
 
 	// 创建客户端
-	client := {{.ProtoPackageName}}.New{{.ServiceName}}ServiceClient(conn)
+	client := {{.ProtoPackageName}}.New{{.ProtoServiceName}}ServiceClient(conn)
 
 	// 缓存客户端
 	core.GlobalRegistry.RegisterClient(serviceInfo, client)
@@ -119,7 +120,7 @@ func Get{{.ServiceName}}Service() {{.ProtoPackageName}}.{{.ServiceName}}ServiceC
 
 // Get{{.ServiceName}}ServiceAddressInfo 获取{{.ServiceName}}服务的具体地址
 func Get{{.ServiceName}}ServiceAddressInfo() string {
-	serviceInfo := {{.ProtoPackageName}}.{{.ServiceName}}Service_ServiceDesc
+	serviceInfo := {{.ProtoPackageName}}.{{.ProtoServiceName}}Service_ServiceDesc
 
 	// 尝试获取已注册的地址
 	if addr, exists := core.GlobalRegistry.Discover(serviceInfo); exists {
@@ -130,20 +131,30 @@ func Get{{.ServiceName}}ServiceAddressInfo() string {
 `
 
 type registryData struct {
-	ServiceName      string // 去掉 Service 后缀，如 User
+	ServiceName      string // Go注册函数名称前缀，如 OpenApiMemory
+	ProtoServiceName string // Proto服务名称前缀，如 Memory (如果是 MemoryService)
 	ProtoPackageName string // proto 生成包名，如 user
 	ProtoImportPath  string // proto 生成包导入路径
 	ModuleRoot       string // 从 go_package 推导的 module 根
 }
 
+type wsMethod struct {
+	Name         string // 方法名，如 Transcribe
+	RequestType  string // 请求类型，如 AudioChunk
+	ResponseType string // 响应类型，如 Transcript
+}
+
 // wiringService 聚合接线所需的单个服务信息。
 type wiringService struct {
-	FullName    string // 完整服务名，如 UserService（用于网关注册函数名）
-	ProtoPkg    string // proto 包名，如 user
-	ProtoImport string // proto 生成包导入路径
-	ImplSeg     string // 实现包目录段，如 user_service（同时用作 import 别名）
-	ImplImport  string // 实现包完整导入路径
-	HasGateway  bool   // 是否有带 google.api.http 注解的方法
+	FullName     string     // 完整服务名，如 UserService（用于网关注册函数名）
+	ProtoPkg     string     // proto 包名，如 user
+	ProtoImport  string     // proto 生成包导入路径
+	ImplSeg      string     // 实现包目录段，如 user_service（同时用作 import 别名）
+	ImplImport   string     // 实现包完整导入路径
+	HasGateway   bool       // 是否有带 google.api.http 注解的方法，或者包含 WebSocket 流式方法
+	Category     string     // "openapi" 或 "grpc-gateway"
+	WsMethods    []wsMethod // WebSocket 流式方法列表
+	HasHttpRoute bool       // 是否具有 http 路由方法（包含 google.api.http），以此决定是否生成 RegisterXxxHandlerFromEndpoint
 }
 
 func main() {
@@ -234,10 +245,14 @@ func deriveModuleRoot(goImportPath string) (string, error) {
 }
 
 func generateServiceRegistry(gen *protogen.Plugin, file *protogen.File, service *protogen.Service, tmpl *template.Template, moduleRoot string) error {
-	serviceName := strings.TrimSuffix(string(service.Desc.Name()), "Service")
+	protoServiceName := strings.TrimSuffix(string(service.Desc.Name()), "Service")
+
+	protoRelPath := strings.TrimPrefix(string(file.GoImportPath), moduleRoot + genProtoSeg)
+	registryName := deriveRegistryName(protoRelPath, protoServiceName)
 
 	data := registryData{
-		ServiceName:      serviceName,
+		ServiceName:      registryName,
+		ProtoServiceName: protoServiceName,
 		ProtoPackageName: string(file.GoPackageName),
 		ProtoImportPath:  string(file.GoImportPath),
 		ModuleRoot:       moduleRoot,
@@ -250,10 +265,10 @@ func generateServiceRegistry(gen *protogen.Plugin, file *protogen.File, service 
 
 	formatted, err := format.Source(buf.Bytes())
 	if err != nil {
-		return fmt.Errorf("service-registry: format %s: %w", serviceName, err)
+		return fmt.Errorf("service-registry: format %s: %w", registryName, err)
 	}
 
-	rel := filepath.Join(registryDir, fmt.Sprintf("%s.go", lowerFirst(serviceName)))
+	rel := filepath.Join(registryDir, fmt.Sprintf("%s.go", lowerFirst(registryName)))
 	g := gen.NewGeneratedFile(rel, "")
 	if _, err := g.Write(formatted); err != nil {
 		return fmt.Errorf("service-registry: write %s: %w", rel, err)
@@ -265,21 +280,90 @@ func generateServiceRegistry(gen *protogen.Plugin, file *protogen.File, service 
 func buildWiringService(file *protogen.File, service *protogen.Service, moduleRoot string, overrides map[string]string) wiringService {
 	full := string(service.Desc.Name())         // UserService
 	stem := strings.TrimSuffix(full, "Service") // User
+
+	protoRelPath := strings.TrimPrefix(string(file.GoImportPath), moduleRoot + genProtoSeg)
 	seg := overrides[stem]
 	if seg == "" {
-		seg = toSnakeCase(stem) + implSuffix
+		seg = strings.ReplaceAll(protoRelPath, "/", "_") + implSuffix
 	}
+	parts := strings.Split(protoRelPath, "/")
+	var implPath string
+	if len(parts) > 1 {
+		implPath = strings.Join(parts[:len(parts)-1], "/") + "/" + parts[len(parts)-1]
+	} else {
+		implPath = protoRelPath
+	}
+
+	var wsMethods []wsMethod
+	for _, method := range service.Methods {
+		// 如果是客户端流式（Client-streaming）或者双向流式（Bidi-streaming），加入 WS 映射列表
+		if method.Desc.IsStreamingClient() {
+			wsMethods = append(wsMethods, wsMethod{
+				Name:         string(method.Desc.Name()),
+				RequestType:  string(method.Input.Desc.Name()),
+				ResponseType: string(method.Output.Desc.Name()),
+			})
+		}
+	}
+
+	hasGateway := serviceHasHTTP(service) || len(wsMethods) > 0
+
 	return wiringService{
-		FullName:    full,
-		ProtoPkg:    string(file.GoPackageName),
-		ProtoImport: string(file.GoImportPath),
-		ImplSeg:     seg,
-		ImplImport:  moduleRoot + "/" + implDir + "/" + seg,
-		HasGateway:  serviceHasHTTP(service),
+		FullName:     full,
+		ProtoPkg:     strings.ReplaceAll(protoRelPath, "/", "_"),
+		ProtoImport:  string(file.GoImportPath),
+		ImplSeg:      seg,
+		ImplImport:   moduleRoot + "/" + implDir + "/" + implPath,
+		HasGateway:   hasGateway,
+		Category:     serviceGatewayCategory(service),
+		WsMethods:    wsMethods,
+		HasHttpRoute: serviceHasHTTP(service),
 	}
 }
 
-// generateWiring 生成单份聚合接线文件：BootAll + RegisterGateways。
+func serviceGatewayCategory(service *protogen.Service) string {
+	for _, method := range service.Methods {
+		options, ok := method.Desc.Options().(*descriptorpb.MethodOptions)
+		if !ok || options == nil {
+			continue
+		}
+		ext := proto.GetExtension(options, annotations.E_Http)
+		if ext == nil {
+			continue
+		}
+		rule, ok := ext.(*annotations.HttpRule)
+		if !ok || rule == nil {
+			continue
+		}
+		v := reflect.ValueOf(rule).Elem().FieldByName("Pattern")
+		if !v.IsValid() || v.IsNil() {
+			continue
+		}
+		patternInterface := v.Interface()
+		var path string
+		switch pat := patternInterface.(type) {
+		case *annotations.HttpRule_Post:
+			path = pat.Post
+		case *annotations.HttpRule_Get:
+			path = pat.Get
+		case *annotations.HttpRule_Put:
+			path = pat.Put
+		case *annotations.HttpRule_Delete:
+			path = pat.Delete
+		case *annotations.HttpRule_Patch:
+			path = pat.Patch
+		}
+		if strings.HasPrefix(path, "/openapi/") {
+			return "openapi"
+		}
+		if strings.HasPrefix(path, "/grpc-gateway/") {
+			return "grpc-gateway"
+		}
+	}
+	return "grpc-gateway"
+}
+
+// generateWiring 生成单份聚合接线文件：BootAll + RegisterGateways + RegisterWebSocketGateways。
 func generateWiring(gen *protogen.Plugin, svcs []wiringService) error {
 	// 收集并排序 import（顺序不影响编译，仅为稳定可读）。
 	type imp struct{ alias, path string }
@@ -305,7 +389,13 @@ func generateWiring(gen *protogen.Plugin, svcs []wiringService) error {
 	fmt.Fprintf(&buf, "package %s\n\n", wiringPackage)
 	buf.WriteString("import (\n")
 	buf.WriteString("\t\"context\"\n\n")
-	buf.WriteString("\t\"github.com/grpc-ecosystem/grpc-gateway/v2/runtime\"\n\n")
+	buf.WriteString("\t\"github.com/gin-gonic/gin\"\n")
+	buf.WriteString("\t\"github.com/grpc-ecosystem/grpc-gateway/v2/runtime\"\n")
+	buf.WriteString("\t\"google.golang.org/grpc\"\n")
+	buf.WriteString("\t\"google.golang.org/grpc/credentials/insecure\"\n\n")
+	buf.WriteString("\t\"github.com/lhdbsbz/backend/gen/local_service_center\"\n")
+	buf.WriteString("\t\"github.com/lhdbsbz/backend/pkg/grpc_gateway_util\"\n")
+	buf.WriteString("\t\"github.com/lhdbsbz/backend/pkg/local_service_center/core\"\n\n")
 	for _, im := range imports {
 		fmt.Fprintf(&buf, "\t%s %q\n", im.alias, im.path)
 	}
@@ -319,14 +409,40 @@ func generateWiring(gen *protogen.Plugin, svcs []wiringService) error {
 	}
 	buf.WriteString("}\n\n")
 
-	// RegisterGateways：仅注册带 HTTP 注解的服务。
+	// RegisterGateways：注册所有带 HTTP 网关的服务到 grpc-gateway mux。
 	buf.WriteString("// RegisterGateways 注册所有带 HTTP 网关的服务到 grpc-gateway mux。\n")
 	buf.WriteString("func RegisterGateways(ctx context.Context, mux *runtime.ServeMux) {\n")
+	buf.WriteString("\topts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}\n")
 	for _, s := range svcs {
-		if !s.HasGateway {
+		if !s.HasHttpRoute {
 			continue
 		}
-		fmt.Fprintf(&buf, "\t_ = %s.Register%sHandlerServer(ctx, mux, %s.Service)\n", s.ProtoPkg, s.FullName, s.ImplSeg)
+		fmt.Fprintf(&buf, "\t_ = %s.Register%sHandlerFromEndpoint(ctx, mux,\n", s.ProtoPkg, s.FullName)
+		fmt.Fprintf(&buf, "\t\tcore.GlobalRegistry.MustDiscover(%s.%s_ServiceDesc), opts)\n", s.ProtoPkg, s.FullName)
+	}
+	buf.WriteString("}\n\n")
+
+	// RegisterWebSocketGateways：注册所有 WebSocket 流式路由到 Gin router。
+	buf.WriteString("// RegisterWebSocketGateways 注册所有 WebSocket 流式路由到 Gin router。\n")
+	buf.WriteString("func RegisterWebSocketGateways(group *gin.RouterGroup) {\n")
+	for _, s := range svcs {
+		if len(s.WsMethods) == 0 {
+			continue
+		}
+		for _, m := range s.WsMethods {
+			fmt.Fprintf(&buf, "\tgroup.GET(\"/%s/%s\", func(c *gin.Context) {\n", s.FullName, m.Name)
+			fmt.Fprintf(&buf, "\t\tclient := local_service_center.Get%s()\n", s.FullName)
+			fmt.Fprintf(&buf, "\t\tstream, err := client.%s(c.Request.Context())\n", m.Name)
+			fmt.Fprintf(&buf, "\t\tif err != nil {\n")
+			fmt.Fprintf(&buf, "\t\t\tc.AbortWithStatus(500)\n")
+			fmt.Fprintf(&buf, "\t\t\treturn\n")
+			fmt.Fprintf(&buf, "\t\t}\n")
+			fmt.Fprintf(&buf, "\t\tgrpc_gateway_util.BidiPipe(c.Writer, c.Request, stream,\n")
+			fmt.Fprintf(&buf, "\t\t\tfunc() *%s.%s { return &%s.%s{} },\n", s.ProtoPkg, m.RequestType, s.ProtoPkg, m.RequestType)
+			fmt.Fprintf(&buf, "\t\t\tfunc() *%s.%s { return &%s.%s{} },\n", s.ProtoPkg, m.ResponseType, s.ProtoPkg, m.ResponseType)
+			fmt.Fprintf(&buf, "\t\t)\n")
+			fmt.Fprintf(&buf, "\t})\n")
+		}
 	}
 	buf.WriteString("}\n")
 
@@ -381,30 +497,28 @@ func lowerFirst(s string) string {
 	return s
 }
 
-// toSnakeCase 驼峰转蛇形，能正确处理全大写缩写：
-// User->user, IdGenerator->id_generator, TdxPlugin->tdx_plugin, MCP->mcp, AI->ai。
-// 与实际目录不一致的历史命名（WebPage->webpage_service 等）用 impl_overrides 覆盖。
-func toSnakeCase(s string) string {
-	runes := []rune(s)
-	var b strings.Builder
-	for i, r := range runes {
-		if unicode.IsUpper(r) {
-			if i > 0 {
-				prev := runes[i-1]
-				next := rune(0)
-				if i+1 < len(runes) {
-					next = runes[i+1]
-				}
-				// 在「小写/数字 -> 大写」或「大写 -> 大写后接小写」的边界插入下划线
-				if unicode.IsLower(prev) || unicode.IsDigit(prev) ||
-					(unicode.IsUpper(prev) && next != 0 && unicode.IsLower(next)) {
-					b.WriteByte('_')
-				}
-			}
-			b.WriteRune(unicode.ToLower(r))
-		} else {
-			b.WriteRune(r)
+// toCamelCase 将 snake_case 或 kebab-case 转换为 CamelCase (e.g. open_api -> OpenApi, memory -> Memory)
+func toCamelCase(s string) string {
+	parts := strings.FieldsFunc(s, func(r rune) bool {
+		return r == '_' || r == '-'
+	})
+	for i, p := range parts {
+		if len(p) > 0 {
+			parts[i] = strings.ToUpper(p[:1]) + strings.ToLower(p[1:])
 		}
 	}
-	return b.String()
+	return strings.Join(parts, "")
 }
+
+func deriveRegistryName(protoRelPath string, protoServiceName string) string {
+	parts := strings.Split(protoRelPath, "/")
+	if len(parts) > 1 {
+		var prefixParts []string
+		for _, p := range parts[:len(parts)-1] {
+			prefixParts = append(prefixParts, toCamelCase(p))
+		}
+		return strings.Join(prefixParts, "") + protoServiceName
+	}
+	return protoServiceName
+}
+
