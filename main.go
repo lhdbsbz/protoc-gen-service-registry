@@ -21,7 +21,6 @@ import (
 	"google.golang.org/genproto/googleapis/api/annotations"
 	"google.golang.org/protobuf/compiler/protogen"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 )
 
@@ -139,25 +138,16 @@ type registryData struct {
 	ModuleRoot       string // 从 go_package 推导的 module 根
 }
 
-type wsMethod struct {
-	Name           string // 方法名，如 Transcribe
-	RequestType    string // 请求类型，如 AudioChunk
-	ResponseType   string // 响应类型，如 Transcript
-	ReqBytesPaths  string // Go [][]string 字面量，空则 "nil"
-	RespBytesPaths string // Go [][]string 字面量，空则 "nil"
-}
-
 // wiringService 聚合接线所需的单个服务信息。
 type wiringService struct {
-	FullName     string     // 完整服务名，如 UserService（用于网关注册函数名）
-	ProtoPkg     string     // proto 包名，如 user
-	ProtoImport  string     // proto 生成包导入路径
-	ImplSeg      string     // 实现包目录段，如 user_service（同时用作 import 别名）
-	ImplImport   string     // 实现包完整导入路径
-	HasGateway   bool       // 是否有带 google.api.http 注解的方法，或者包含 WebSocket 流式方法
-	Category     string     // "openapi" 或 "grpc-gateway"
-	WsMethods    []wsMethod // WebSocket 流式方法列表
-	HasHttpRoute bool       // 是否具有 http 路由方法（包含 google.api.http），以此决定是否生成 RegisterXxxHandlerFromEndpoint
+	FullName     string   // 完整服务名，如 UserService（用于网关注册函数名）
+	ProtoPkg     string   // proto 包名，如 user
+	ProtoImport  string   // proto 生成包导入路径
+	ImplSeg      string   // 实现包目录段，如 user_service（同时用作 import 别名）
+	ImplImport   string   // 实现包完整导入路径
+	HasGateway   bool     // 是否有带 google.api.http 注解的方法
+	Category     string   // "openapi" 或 "grpc-gateway"
+	HasHttpRoute bool     // 是否具有 http 路由方法（包含 google.api.http），以此决定是否生成 RegisterXxxHandlerFromEndpoint
 	// 走 grpc-gateway mux 的纯 server-streaming 方法全名（/pkg.Service/Method）：响应须 SSE 直出、不套信封。
 	StreamingHttpMethods []string
 }
@@ -299,20 +289,9 @@ func buildWiringService(file *protogen.File, service *protogen.Service, moduleRo
 		implPath = protoRelPath
 	}
 
-	var wsMethods []wsMethod
 	var streamingHttp []string
 	pkgName := string(file.Desc.Package()) // proto 包名，如 proto.story
 	for _, method := range service.Methods {
-		// 如果是客户端流式（Client-streaming）或者双向流式（Bidi-streaming），加入 WS 映射列表
-		if method.Desc.IsStreamingClient() {
-			wsMethods = append(wsMethods, wsMethod{
-				Name:           string(method.Desc.Name()),
-				RequestType:    string(method.Input.Desc.Name()),
-				ResponseType:   string(method.Output.Desc.Name()),
-				ReqBytesPaths:  goBytesPathsLiteral(collectBytesPaths(method.Input.Desc)),
-				RespBytesPaths: goBytesPathsLiteral(collectBytesPaths(method.Output.Desc)),
-			})
-		}
 		// 纯 server-streaming 且挂了 google.api.http：走 grpc-gateway mux、按 SSE 直出，
 		// 须在响应改写处跳过统一信封。全名格式与运行时 runtime.RPCMethod 一致：/pkg.Service/Method。
 		if methodHasHTTP(method) && method.Desc.IsStreamingServer() && !method.Desc.IsStreamingClient() {
@@ -321,7 +300,7 @@ func buildWiringService(file *protogen.File, service *protogen.Service, moduleRo
 		}
 	}
 
-	hasGateway := serviceHasHTTP(service) || len(wsMethods) > 0
+	hasGateway := serviceHasHTTP(service)
 
 	return wiringService{
 		FullName:             full,
@@ -331,7 +310,6 @@ func buildWiringService(file *protogen.File, service *protogen.Service, moduleRo
 		ImplImport:           moduleRoot + "/" + implDir + "/" + implPath,
 		HasGateway:           hasGateway,
 		Category:             serviceGatewayCategory(service),
-		WsMethods:            wsMethods,
 		HasHttpRoute:         serviceHasHTTP(service),
 		StreamingHttpMethods: streamingHttp,
 	}
@@ -379,7 +357,7 @@ func serviceGatewayCategory(service *protogen.Service) string {
 	return "grpc-gateway"
 }
 
-// generateWiring 生成单份聚合接线文件：BootAll + RegisterGateways + MuxRegistry + StreamingGatewayMethods。
+// generateWiring 生成单份聚合接线文件：BootAll + RegisterGateways + StreamingGatewayMethods。
 func generateWiring(gen *protogen.Plugin, svcs []wiringService) error {
 	// 收集并排序 import（顺序不影响编译，仅为稳定可读）。
 	type imp struct{ alias, path string }
@@ -407,10 +385,7 @@ func generateWiring(gen *protogen.Plugin, svcs []wiringService) error {
 	buf.WriteString("\t\"context\"\n\n")
 	buf.WriteString("\t\"github.com/grpc-ecosystem/grpc-gateway/v2/runtime\"\n")
 	buf.WriteString("\t\"google.golang.org/grpc\"\n")
-	buf.WriteString("\t\"google.golang.org/grpc/credentials/insecure\"\n")
-	buf.WriteString("\t\"google.golang.org/protobuf/proto\"\n\n")
-	buf.WriteString("\t\"github.com/lhdbsbz/backend/gen/local_service_center\"\n")
-	buf.WriteString("\t\"github.com/lhdbsbz/backend/pkg/grpc_gateway_util\"\n")
+	buf.WriteString("\t\"google.golang.org/grpc/credentials/insecure\"\n\n")
 	buf.WriteString("\t\"github.com/lhdbsbz/backend/pkg/local_service_center/core\"\n\n")
 	for _, im := range imports {
 		fmt.Fprintf(&buf, "\t%s %q\n", im.alias, im.path)
@@ -438,22 +413,6 @@ func generateWiring(gen *protogen.Plugin, svcs []wiringService) error {
 	}
 	buf.WriteString("}\n\n")
 
-	// MuxRegistry：方法路径 → 拨流+类型工厂+bytes路径。供单 mux 端点 (MuxServe) 按 OPEN 帧查表。
-	buf.WriteString("\n// MuxRegistry 是单 WS 多路复用端点的方法注册表：OPEN 帧的方法路径映射到拨流与编解码信息。\n")
-	buf.WriteString("var MuxRegistry = map[string]grpc_gateway_util.MuxEntry{\n")
-	for _, s := range svcs {
-		for _, m := range s.WsMethods {
-			fmt.Fprintf(&buf, "\t\"/%s/%s\": {\n", s.FullName, m.Name)
-			fmt.Fprintf(&buf, "\t\tDial: func(ctx context.Context) (grpc.ClientStream, error) { return local_service_center.Get%s().%s(ctx) },\n", s.FullName, m.Name)
-			fmt.Fprintf(&buf, "\t\tNewReq:  func() proto.Message { return &%s.%s{} },\n", s.ProtoPkg, m.RequestType)
-			fmt.Fprintf(&buf, "\t\tNewResp: func() proto.Message { return &%s.%s{} },\n", s.ProtoPkg, m.ResponseType)
-			fmt.Fprintf(&buf, "\t\tReqBytesPaths:  %s,\n", m.ReqBytesPaths)
-			fmt.Fprintf(&buf, "\t\tRespBytesPaths: %s,\n", m.RespBytesPaths)
-			fmt.Fprintf(&buf, "\t},\n")
-		}
-	}
-	buf.WriteString("}\n")
-
 	// StreamingGatewayMethods：走 grpc-gateway mux 的 server-streaming 方法全名集合。
 	// 响应须按 SSE 逐块直出、不套统一信封 {code,message,data}。由「server-streaming + google.api.http」
 	// 自动判定，新增此类接口无需手改 pkg/grpc_gateway_util——重新生成即可，调用方按需引用本集合。
@@ -479,69 +438,6 @@ func generateWiring(gen *protogen.Plugin, svcs []wiringService) error {
 		return fmt.Errorf("service-registry: write %s: %w", wiringOut, err)
 	}
 	return nil
-}
-
-// collectBytesPaths 遍历消息描述符，算出所有 bytes 字段的 JSON key 路径（protojson 用 JSONName=lowerCamel）。
-// 递归进入 message 字段；以"当前在栈上"的 FullName 集合阻断自引用环，但允许同一类型在不同分支重复出现（菱形）。
-// 从 protoc-gen-frontend-api 复制，供生成 MuxRegistry 的 ReqBytesPaths/RespBytesPaths 使用。
-func collectBytesPaths(msg protoreflect.MessageDescriptor) [][]string {
-	var out [][]string
-	onStack := map[protoreflect.FullName]bool{}
-
-	var walk func(m protoreflect.MessageDescriptor, prefix []string)
-	walk = func(m protoreflect.MessageDescriptor, prefix []string) {
-		if onStack[m.FullName()] {
-			return
-		}
-		onStack[m.FullName()] = true
-		defer delete(onStack, m.FullName())
-
-		fields := m.Fields()
-		for i := 0; i < fields.Len(); i++ {
-			f := fields.Get(i)
-			path := append(append([]string{}, prefix...), f.JSONName())
-
-			if f.IsMap() {
-				if f.MapValue().Kind() == protoreflect.BytesKind {
-					out = append(out, path)
-				}
-				continue
-			}
-
-			switch f.Kind() {
-			case protoreflect.BytesKind:
-				out = append(out, path)
-			case protoreflect.MessageKind, protoreflect.GroupKind:
-				walk(f.Message(), path)
-			}
-		}
-	}
-	walk(msg, nil)
-	return out
-}
-
-// goBytesPathsLiteral 把 [][]string 序列化为 Go 复合字面量；空返回 "nil"。
-func goBytesPathsLiteral(paths [][]string) string {
-	if len(paths) == 0 {
-		return "nil"
-	}
-	var b strings.Builder
-	b.WriteString("[][]string{")
-	for i, p := range paths {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString("{")
-		for j, seg := range p {
-			if j > 0 {
-				b.WriteString(", ")
-			}
-			fmt.Fprintf(&b, "%q", seg)
-		}
-		b.WriteString("}")
-	}
-	b.WriteString("}")
-	return b.String()
 }
 
 // serviceHasHTTP 判断服务是否有带 google.api.http 注解的方法（即是否需要网关注册）。
