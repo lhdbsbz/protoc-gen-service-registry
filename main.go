@@ -140,14 +140,14 @@ type registryData struct {
 
 // wiringService 聚合接线所需的单个服务信息。
 type wiringService struct {
-	FullName     string   // 完整服务名，如 UserService（用于网关注册函数名）
-	ProtoPkg     string   // proto 包名，如 user
-	ProtoImport  string   // proto 生成包导入路径
-	ImplSeg      string   // 实现包目录段，如 user_service（同时用作 import 别名）
-	ImplImport   string   // 实现包完整导入路径
-	HasGateway   bool     // 是否有带 google.api.http 注解的方法
-	Category     string   // "openapi" 或 "grpc-gateway"
-	HasHttpRoute bool     // 是否具有 http 路由方法（包含 google.api.http），以此决定是否生成 RegisterXxxHandlerFromEndpoint
+	FullName     string // 完整服务名，如 UserService（用于网关注册函数名）
+	ProtoPkg     string // proto 包名，如 user
+	ProtoImport  string // proto 生成包导入路径
+	ImplSeg      string // 实现包目录段，如 user_service（同时用作 import 别名）
+	ImplImport   string // 实现包完整导入路径
+	HasGateway   bool   // 是否有带 google.api.http 注解的方法
+	Category     string // "openapi" 或 "grpc-gateway"
+	HasHttpRoute bool   // 是否具有 http 路由方法（包含 google.api.http），以此决定是否生成 RegisterXxxHandlerFromEndpoint
 	// 走 grpc-gateway mux 的纯 server-streaming 方法全名（/pkg.Service/Method）：响应须 SSE 直出、不套信封。
 	StreamingHttpMethods []string
 }
@@ -242,7 +242,7 @@ func deriveModuleRoot(goImportPath string) (string, error) {
 func generateServiceRegistry(gen *protogen.Plugin, file *protogen.File, service *protogen.Service, tmpl *template.Template, moduleRoot string) error {
 	protoServiceName := strings.TrimSuffix(string(service.Desc.Name()), "Service")
 
-	protoRelPath := strings.TrimPrefix(string(file.GoImportPath), moduleRoot + genProtoSeg)
+	protoRelPath := strings.TrimPrefix(string(file.GoImportPath), moduleRoot+genProtoSeg)
 	registryName := deriveRegistryName(protoRelPath, protoServiceName)
 
 	data := registryData{
@@ -276,7 +276,7 @@ func buildWiringService(file *protogen.File, service *protogen.Service, moduleRo
 	full := string(service.Desc.Name())         // UserService
 	stem := strings.TrimSuffix(full, "Service") // User
 
-	protoRelPath := strings.TrimPrefix(string(file.GoImportPath), moduleRoot + genProtoSeg)
+	protoRelPath := strings.TrimPrefix(string(file.GoImportPath), moduleRoot+genProtoSeg)
 	seg := overrides[stem]
 	if seg == "" {
 		seg = strings.ReplaceAll(protoRelPath, "/", "_") + implSuffix
@@ -386,7 +386,7 @@ func generateWiring(gen *protogen.Plugin, svcs []wiringService) error {
 	buf.WriteString("\t\"github.com/grpc-ecosystem/grpc-gateway/v2/runtime\"\n")
 	buf.WriteString("\t\"google.golang.org/grpc\"\n")
 	buf.WriteString("\t\"google.golang.org/grpc/credentials/insecure\"\n\n")
-	buf.WriteString("\t\"github.com/lhdbsbz/backend/pkg/local_service_center/core\"\n\n")
+	buf.WriteString("\t\"github.com/lhdbsbz/service/pkg/local_service_center/core\"\n\n")
 	for _, im := range imports {
 		fmt.Fprintf(&buf, "\t%s %q\n", im.alias, im.path)
 	}
@@ -504,4 +504,3 @@ func deriveRegistryName(protoRelPath string, protoServiceName string) string {
 	}
 	return protoServiceName
 }
-
